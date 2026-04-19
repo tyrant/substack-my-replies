@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Substack My Replies",
+  "version": "1.0.0",
+  "description": "Shows how many replies you've posted on a Substack note.",
+  "permissions": ["storage"],
+  "host_permissions": ["*://substack.com/*"],
+  "content_scripts": [
+    {
+      "matches": ["*://substack.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
