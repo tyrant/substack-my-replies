@@ -1,0 +1,29 @@
+{
+  "name": "substack-my-replies",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "jest --coverage"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.0.0",
+    "@babel/preset-env": "^7.0.0",
+    "jest": "^29.0.0",
+    "jest-environment-jsdom": "^29.0.0"
+  },
+  "jest": {
+    "testEnvironment": "jest-environment-jsdom",
+    "coverageProvider": "babel",
+    "collectCoverageFrom": [
+      "content.js"
+    ],
+    "coverageThreshold": {
+      "global": {
+        "lines": 100,
+        "functions": 100,
+        "branches": 100,
+        "statements": 100
+      }
+    }
+  }
+}

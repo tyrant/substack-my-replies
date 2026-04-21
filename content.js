@@ -233,17 +233,17 @@ const CACHE_KEY = 'smr_cache';
 // In-memory copy of storage, kept in sync. Used by augmentAllReplyCards so
 // annotation is synchronous (no per-card async lookup).
 let memCache = {};
-chrome.storage.local.get(CACHE_KEY, result => {
-  memCache = result[CACHE_KEY] ?? {};
-  augmentAllReplyCards(); // re-annotate once cache has loaded
-});
 
-function getCache(noteId) {
-  return new Promise(resolve => {
-    const entry = memCache[String(noteId)];
-    // Only accept array-format entries; old number-format entries are stale.
-    resolve(Array.isArray(entry) ? entry : null);
-  });
+// Resolved once the initial chrome.storage.local.get has completed, so that
+// getCache() never returns a stale "cache miss" before storage has loaded.
+let _memCacheReady;
+const memCacheReady = new Promise(resolve => { _memCacheReady = resolve; });
+
+async function getCache(noteId) {
+  await memCacheReady;
+  const entry = memCache[String(noteId)];
+  // Only accept array-format entries; old number-format entries are stale.
+  return Array.isArray(entry) ? entry : null;
 }
 
 function setCache(noteId, ids) {
@@ -272,7 +272,11 @@ function findNoteIdNear(el) {
     if (!node) break;
     for (const a of node.querySelectorAll('a[href*="/note/c-"]')) {
       const m = a.href.match(/\/note\/c-(\d+)/);
-      if (m && m[1] !== currentNoteId) return m[1];
+      if (!m) continue;
+      // The first note link found in document order determines which card this
+      // button belongs to. If it's the current page's note, this is the main
+      // note's own interaction bar — skip it. Otherwise it's a reply card.
+      return m[1] === currentNoteId ? null : m[1];
     }
   }
   return null;
@@ -382,13 +386,46 @@ function checkUrl() {
   if (m) handleNote(m[1]);
 }
 
-const _pushState = history.pushState.bind(history);
-history.pushState = function (...args) {
-  _pushState(...args);
-  window.dispatchEvent(new Event('smr:urlchange'));
-};
+function init() {
+  const _pushState = history.pushState.bind(history);
+  history.pushState = function (...args) {
+    _pushState(...args);
+    window.dispatchEvent(new Event('smr:urlchange'));
+  };
 
-window.addEventListener('popstate', checkUrl);
-window.addEventListener('smr:urlchange', checkUrl);
+  window.addEventListener('popstate', checkUrl);
+  window.addEventListener('smr:urlchange', checkUrl);
 
-checkUrl();
+  checkUrl();
+}
+
+/* istanbul ignore if */
+if (typeof module === 'undefined') {
+  // Browser-only bootstrap (unreachable in Node.js test environment).
+  chrome.storage.local.get(CACHE_KEY, result => {
+    memCache = result[CACHE_KEY] ?? {};
+    _memCacheReady(); // unblock getCache() now that storage has loaded
+    augmentAllReplyCards(); // re-annotate once cache has loaded
+  });
+  init();
+} else {
+  _memCacheReady(); // test env: storage is pre-seeded via _state.memCache; unblock immediately
+  module.exports = {
+    ensureStyle, getBadge,
+    setBadgeInitial, setBadgeChecking, setBadgeComplete, setBadgeError,
+    findRepliesElement, injectBadge,
+    runCheck,
+    getCache, setCache,
+    findNoteIdNear, augmentAllReplyCards, startAugObserver,
+    handleNote, checkUrl, init,
+    // expose mutable state for tests
+    _state: {
+      get checkToken() { return checkToken; },
+      set checkToken(v) { checkToken = v; },
+      get memCache() { return memCache; },
+      set memCache(v) { memCache = v; },
+      get currentNoteId() { return currentNoteId; },
+      set currentNoteId(v) { currentNoteId = v; },
+    },
+  };
+}
