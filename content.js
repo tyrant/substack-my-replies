@@ -34,10 +34,18 @@ function ensureStyle() {
       white-space: nowrap;
       color: var(--color-fg-secondary-themed, #888);
     }
-    #${BADGE_ID} a {
+    #${BADGE_ID} a,
+    [${MINE_ATTR}] a {
       color: inherit;
       text-decoration: underline;
       cursor: pointer;
+    }
+    [${MINE_ATTR}] {
+      margin-top: auto;
+      margin-bottom: auto;
+      vertical-align: middle;
+      border-radius: var(--border-radius-sm, 4px);
+      white-space: nowrap;
     }
     .smr-spinner {
       display: inline-block;
@@ -271,6 +279,9 @@ function findNoteIdNear(el) {
     node = node.parentElement;
     if (!node) break;
     for (const a of node.querySelectorAll('a[href*="/note/c-"]')) {
+      // Ignore links we injected ourselves (annotation spans and the main badge)
+      // — they contain reply-level note URLs that would corrupt card identification.
+      if (a.closest(`[${MINE_ATTR}], #${BADGE_ID}`)) continue;
       const m = a.href.match(/\/note\/c-(\d+)/);
       if (!m) continue;
       // The first note link found in document order determines which card this
@@ -283,14 +294,16 @@ function findNoteIdNear(el) {
 }
 
 /**
- * Scans all Comment buttons on reply cards and inserts/updates a "(Y yours)"
- * annotation span after the count div inside each button.
+ * Scans all Comment buttons on reply cards and inserts/updates a "(yours: …)"
+ * annotation span immediately after each button (as a sibling, not inside it,
+ * so clicks on reply links don't trigger the button's own click handler).
  *
  * Reply card interaction bar structure (confirmed via DOM inspection):
  *   <button aria-label="Comment">
  *     <svg>...</svg>
  *     <div>1</div>   ← bare count, no label text
  *   </button>
+ *   <span data-smr-mine="…">…</span>  ← annotation injected here
  *
  * We skip any Comment button whose nearest note link matches currentNoteId
  * (i.e. the main note's own comment button, if present).
@@ -306,18 +319,38 @@ function augmentAllReplyCards() {
     if (!countDiv) continue;
 
     // Reuse existing annotation for this noteId; create one otherwise.
-    let annot = countDiv.nextElementSibling;
+    // The annotation lives as a sibling immediately after the button.
+    let annot = btn.nextElementSibling;
     if (!annot || annot.getAttribute(MINE_ATTR) !== noteId) {
       if (annot?.hasAttribute(MINE_ATTR)) annot.remove();
       annot = document.createElement('span');
       annot.setAttribute(MINE_ATTR, noteId);
       annot.style.cssText = 'color: var(--color-fg-secondary-themed, #888); font-size: inherit;';
-      countDiv.insertAdjacentElement('afterend', annot);
+      btn.insertAdjacentElement('afterend', annot);
     }
 
     const entry = memCache[String(noteId)];
-    const label = Array.isArray(entry) ? `(${entry.length} yours)` : '(? yours)';
-    if (annot.textContent !== label) annot.textContent = label;
+    const stateKey = Array.isArray(entry) ? entry.join(',') : '?';
+    if (annot.dataset.smrState === stateKey) continue;
+    annot.dataset.smrState = stateKey;
+
+    annot.innerHTML = '';
+    if (!Array.isArray(entry)) {
+      annot.textContent = '(? yours)';
+    } else if (entry.length === 0) {
+      annot.textContent = '(yours: 0)';
+    } else {
+      annot.appendChild(document.createTextNode('(yours: '));
+      entry.forEach((id, i) => {
+        if (i > 0) annot.appendChild(document.createTextNode(', '));
+        const a = document.createElement('a');
+        a.textContent = String(i + 1);
+        a.href = `https://substack.com/profile/${MY_USER_SLUG}/note/c-${id}`;
+        a.target = '_blank';
+        annot.appendChild(a);
+      });
+      annot.appendChild(document.createTextNode(')'));
+    }
   }
 }
 

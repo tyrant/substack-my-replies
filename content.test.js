@@ -593,6 +593,32 @@ describe('findNoteIdNear', () => {
     expect(mod.findNoteIdNear(btn)).toBeNull();
   });
 
+  test('ignores links inside a [data-smr-mine] annotation span', () => {
+    mod._state.currentNoteId = '999';
+    const card = document.createElement('div');
+    const btn = document.createElement('button');
+    btn.setAttribute('aria-label', 'Comment');
+    const countDiv = document.createElement('div');
+    btn.appendChild(countDiv);
+    card.appendChild(btn);
+    // Annotation span as augmentAllReplyCards now injects it: sibling after the button.
+    // Its injected reply link appears before realLink in document order —
+    // ensuring the closest() skip fires before realLink is reached.
+    const annot = document.createElement('span');
+    annot.setAttribute('data-smr-mine', '111');
+    const injectedLink = document.createElement('a');
+    injectedLink.href = 'https://substack.com/profile/4619740-mikey-clarke/note/c-99999';
+    annot.appendChild(injectedLink);
+    btn.insertAdjacentElement('afterend', annot);
+    // Real card link comes after the annotation in document order
+    const realLink = document.createElement('a');
+    realLink.href = 'https://substack.com/@user/note/c-111';
+    card.appendChild(realLink);
+    document.body.appendChild(card);
+    // Should return '111' (the real card link), not '99999' (the injected reply link)
+    expect(mod.findNoteIdNear(btn)).toBe('111');
+  });
+
   test('skips ancestor links whose href does not match the numeric id pattern', () => {
     mod._state.currentNoteId = null;
     const container = document.createElement('div');
@@ -658,11 +684,26 @@ describe('augmentAllReplyCards', () => {
     expect(annot.getAttribute('data-smr-mine')).toBe('111');
   });
 
-  test('inserts "(N yours)" when cache entry is present', () => {
-    mod._state.memCache = { '111': ['a', 'b'] };
+  test('inserts "(yours: 0)" when cache entry is an empty array', () => {
+    mod._state.memCache = { '111': [] };
     makeReplyCard('111', '999');
     mod.augmentAllReplyCards();
-    expect(document.querySelector('[data-smr-mine]').textContent).toBe('(2 yours)');
+    expect(document.querySelector('[data-smr-mine]').textContent).toBe('(yours: 0)');
+  });
+
+  test('inserts numbered links when cache entry has ids', () => {
+    mod._state.memCache = { '111': ['idA', 'idB'] };
+    makeReplyCard('111', '999');
+    mod.augmentAllReplyCards();
+    const annot = document.querySelector('[data-smr-mine]');
+    const links = annot.querySelectorAll('a');
+    expect(links).toHaveLength(2);
+    expect(links[0].textContent).toBe('1');
+    expect(links[0].href).toContain('c-idA');
+    expect(links[0].target).toBe('_blank');
+    expect(links[1].textContent).toBe('2');
+    expect(links[1].href).toContain('c-idB');
+    expect(annot.textContent).toBe('(yours: 1, 2)');
   });
 
   test('skips Comment button belonging to the main note', () => {
@@ -694,14 +735,16 @@ describe('augmentAllReplyCards', () => {
     expect(document.querySelectorAll('[data-smr-mine]').length).toBe(1);
   });
 
-  test('updates label text when cache entry changes', () => {
+  test('updates annotation when cache entry changes', () => {
     mod._state.memCache = {};
     makeReplyCard('111', '999');
     mod.augmentAllReplyCards();
     expect(document.querySelector('[data-smr-mine]').textContent).toBe('(? yours)');
     mod._state.memCache = { '111': ['x'] };
     mod.augmentAllReplyCards();
-    expect(document.querySelector('[data-smr-mine]').textContent).toBe('(1 yours)');
+    const annot = document.querySelector('[data-smr-mine]');
+    expect(annot.querySelector('a[href*="c-x"]')).not.toBeNull();
+    expect(annot.textContent).toBe('(yours: 1)');
   });
 
   test('replaces a stale annotation element (wrong noteId)', () => {
@@ -714,10 +757,11 @@ describe('augmentAllReplyCards', () => {
     btn.setAttribute('aria-label', 'Comment');
     const countDiv = document.createElement('div');
     btn.appendChild(countDiv);
+    card.appendChild(btn);
+    // Stale annotation is a sibling of the button (the new placement location)
     const stale = document.createElement('span');
     stale.setAttribute('data-smr-mine', '000');
-    countDiv.insertAdjacentElement('afterend', stale);
-    card.appendChild(btn);
+    btn.insertAdjacentElement('afterend', stale);
     document.body.appendChild(card);
 
     mod.augmentAllReplyCards();
