@@ -199,7 +199,11 @@ describe('setBadgeComplete', () => {
 
   test('shows numbered links for each reply id', () => {
     makeBadge();
-    mod.setBadgeComplete(['111', '222', '333'], '1');
+    mod.setBadgeComplete([
+      { id: '111', title: 'First Note', date: '2025-04-19T10:00:00Z' },
+      { id: '222', title: '', date: '' },
+      { id: '333', title: 'Third Note', date: '2025-04-20T10:00:00Z' },
+    ], '1');
     const links = document.querySelectorAll('#smr-badge a[href*="c-"]');
     expect(links).toHaveLength(3);
     expect(links[0].textContent).toBe('1');
@@ -210,8 +214,20 @@ describe('setBadgeComplete', () => {
 
   test('all reply links open in a new tab', () => {
     makeBadge();
-    mod.setBadgeComplete(['111'], '1');
+    mod.setBadgeComplete([{ id: '111', title: '', date: '' }], '1');
     expect(document.querySelector('#smr-badge a[href*="c-"]').target).toBe('_blank');
+  });
+
+  test('sets title tooltip on reply links', () => {
+    makeBadge();
+    mod.setBadgeComplete([
+      { id: '111', title: 'My Note', date: '2025-04-19T10:00:00Z' },
+      { id: '222', title: '', date: '' },
+    ], '1');
+    const links = document.querySelectorAll('#smr-badge a[href*="c-"]');
+    expect(links[0].title).toContain('My Note');
+    expect(links[0].title).toContain('Apr');
+    expect(links[1].title).toBe('');
   });
 
   test('renders a recheck link that starts a new check', async () => {
@@ -430,7 +446,52 @@ describe('runCheck', () => {
       nextCursor: null,
     });
     await mod.runCheck('700');
-    expect(mod._state.memCache['700']).toEqual(['cX']);
+    expect(mod._state.memCache['700']).toEqual([{ id: 'cX', title: '', date: '' }]);
+  });
+
+  test('extracts first URL from comment.body as title', async () => {
+    makeBadge();
+    mockFetch({
+      commentBranches: [
+        {
+          comment: { id: 'c1', user_id: 4619740, body: 'See https://example.substack.com/p/my-post for details', date: '2025-04-19T00:00:00Z' },
+          descendantComments: [],
+        },
+      ],
+      nextCursor: null,
+    });
+    await mod.runCheck('750');
+    expect(mod._state.memCache['750']).toEqual([{ id: 'c1', title: 'https://example.substack.com/p/my-post', date: '2025-04-19T00:00:00Z' }]);
+  });
+
+  test('returns empty title when body has no URL', async () => {
+    makeBadge();
+    mockFetch({
+      commentBranches: [
+        {
+          comment: { id: 'c1', user_id: 4619740, body: 'Just text, no link.', date: '2025-04-19T00:00:00Z' },
+          descendantComments: [],
+        },
+      ],
+      nextCursor: null,
+    });
+    await mod.runCheck('751');
+    expect(mod._state.memCache['751']).toEqual([{ id: 'c1', title: '', date: '2025-04-19T00:00:00Z' }]);
+  });
+
+  test('strips trailing punctuation from extracted URL', async () => {
+    makeBadge();
+    mockFetch({
+      commentBranches: [
+        {
+          comment: { id: 'c1', user_id: 4619740, body: 'Check https://example.com/p/post. Next sentence.', date: '2025-04-19T00:00:00Z' },
+          descendantComments: [],
+        },
+      ],
+      nextCursor: null,
+    });
+    await mod.runCheck('752');
+    expect(mod._state.memCache['752']).toEqual([{ id: 'c1', title: 'https://example.com/p/post', date: '2025-04-19T00:00:00Z' }]);
   });
 
   test('fetch URL includes comment_id param', async () => {
@@ -512,9 +573,10 @@ describe('getCache', () => {
     expect(await mod.getCache('1')).toBeNull();
   });
 
-  test('returns the array when entry is an array', async () => {
-    mod._state.memCache = { '1': ['a', 'b'] };
-    expect(await mod.getCache('1')).toEqual(['a', 'b']);
+  test('returns the array when entry is a new-format array of objects', async () => {
+    const entries = [{ id: 'a', title: '', date: '' }, { id: 'b', title: '', date: '' }];
+    mod._state.memCache = { '1': entries };
+    expect(await mod.getCache('1')).toEqual(entries);
   });
 
   test('returns null for old number-format entries', async () => {
@@ -522,9 +584,15 @@ describe('getCache', () => {
     expect(await mod.getCache('1')).toBeNull();
   });
 
+  test('returns null for old array-of-strings format', async () => {
+    mod._state.memCache = { '1': ['a', 'b'] };
+    expect(await mod.getCache('1')).toBeNull();
+  });
+
   test('coerces numeric argument to string key', async () => {
-    mod._state.memCache = { '42': ['x'] };
-    expect(await mod.getCache(42)).toEqual(['x']);
+    const entry = [{ id: 'x', title: '', date: '' }];
+    mod._state.memCache = { '42': entry };
+    expect(await mod.getCache(42)).toEqual(entry);
   });
 });
 
@@ -555,6 +623,12 @@ describe('setCache', () => {
     expect(chromeMock.storage.local.set).toHaveBeenCalledWith({
       smr_cache: { '5': ['id1'] },
     });
+  });
+
+  test('does not throw and still updates memCache when chrome storage is unavailable', () => {
+    chromeMock.storage.local.get.mockImplementation(() => { throw new Error('Extension context invalidated.'); });
+    expect(() => mod.setCache('9', ['id1'])).not.toThrow();
+    expect(mod._state.memCache['9']).toEqual(['id1']);
   });
 });
 
@@ -692,7 +766,10 @@ describe('augmentAllReplyCards', () => {
   });
 
   test('inserts numbered links when cache entry has ids', () => {
-    mod._state.memCache = { '111': ['idA', 'idB'] };
+    mod._state.memCache = { '111': [
+      { id: 'idA', title: 'Note A', date: '2025-04-01T00:00:00Z' },
+      { id: 'idB', title: '', date: '' },
+    ] };
     makeReplyCard('111', '999');
     mod.augmentAllReplyCards();
     const annot = document.querySelector('[data-smr-mine]');
@@ -704,6 +781,15 @@ describe('augmentAllReplyCards', () => {
     expect(links[1].textContent).toBe('2');
     expect(links[1].href).toContain('c-idB');
     expect(annot.textContent).toBe('(yours: 1, 2)');
+  });
+
+  test('sets title tooltip on reply links', () => {
+    mod._state.memCache = { '111': [{ id: 'idA', title: 'Some Note', date: '2025-04-01T00:00:00Z' }] };
+    makeReplyCard('111', '999');
+    mod.augmentAllReplyCards();
+    const link = document.querySelector('[data-smr-mine] a');
+    expect(link.title).toContain('Some Note');
+    expect(link.title).toContain('Apr');
   });
 
   test('skips Comment button belonging to the main note', () => {
@@ -740,7 +826,7 @@ describe('augmentAllReplyCards', () => {
     makeReplyCard('111', '999');
     mod.augmentAllReplyCards();
     expect(document.querySelector('[data-smr-mine]').textContent).toBe('(? yours)');
-    mod._state.memCache = { '111': ['x'] };
+    mod._state.memCache = { '111': [{ id: 'x', title: '', date: '' }] };
     mod.augmentAllReplyCards();
     const annot = document.querySelector('[data-smr-mine]');
     expect(annot.querySelector('a[href*="c-x"]')).not.toBeNull();
@@ -771,6 +857,82 @@ describe('augmentAllReplyCards', () => {
 });
 
 // ---------------------------------------------------------------------------
+// checkRelatedNote
+// ---------------------------------------------------------------------------
+
+describe('checkRelatedNote', () => {
+  test('fetches and caches replies for an unchecked note', async () => {
+    mockFetch({
+      commentBranches: [
+        { comment: { id: 'r1', user_id: 4619740, body: 'https://example.com/p/post', date: '2025-01-01' }, descendantComments: [] },
+      ],
+      nextCursor: null,
+    });
+    await mod.checkRelatedNote('111');
+    expect(mod._state.memCache['111']).toEqual([{ id: 'r1', title: 'https://example.com/p/post', date: '2025-01-01' }]);
+  });
+
+  test('does nothing if the note was already checked this session', async () => {
+    mod._state.relatedNoteChecked.add('111');
+    await mod.checkRelatedNote('111');
+    expect(global.fetch).toBeUndefined();
+  });
+
+  test('removes note from checked set after an HTTP error so it can retry', async () => {
+    global.fetch = jest.fn(() => Promise.resolve({ ok: false, status: 500 }));
+    await mod.checkRelatedNote('111');
+    expect(mod._state.relatedNoteChecked.has('111')).toBe(false);
+  });
+
+  test('removes note from checked set after a network error so it can retry', async () => {
+    global.fetch = jest.fn(() => Promise.reject(new Error('net fail')));
+    await mod.checkRelatedNote('111');
+    expect(mod._state.relatedNoteChecked.has('111')).toBe(false);
+  });
+
+  test('updates annotation on the page after caching', async () => {
+    mod._state.currentNoteId = '999';
+    const card = document.createElement('div');
+    const link = document.createElement('a');
+    link.href = 'https://substack.com/@user/note/c-111';
+    card.appendChild(link);
+    const btn = document.createElement('button');
+    btn.setAttribute('aria-label', 'Comment');
+    btn.appendChild(document.createElement('div'));
+    card.appendChild(btn);
+    document.body.appendChild(card);
+
+    mockFetch({
+      commentBranches: [
+        { comment: { id: 'r1', user_id: 4619740, title: '', date: '' }, descendantComments: [] },
+      ],
+      nextCursor: null,
+    });
+    await mod.checkRelatedNote('111');
+
+    const annot = document.querySelector('[data-smr-mine="111"]');
+    expect(annot).not.toBeNull();
+    expect(annot.querySelector('a[href*="c-r1"]')).not.toBeNull();
+  });
+
+  test('multi-page: follows nextCursor', async () => {
+    mockFetch(
+      {
+        commentBranches: [{ comment: { id: 'r1', user_id: 4619740, title: '', date: '' }, descendantComments: [] }],
+        nextCursor: 'cur1',
+      },
+      {
+        commentBranches: [{ comment: { id: 'r2', user_id: 4619740, title: '', date: '' }, descendantComments: [] }],
+        nextCursor: null,
+      }
+    );
+    await mod.checkRelatedNote('222');
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(mod._state.memCache['222']).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // startAugObserver
 // ---------------------------------------------------------------------------
 
@@ -794,7 +956,10 @@ describe('handleNote', () => {
   });
 
   test('cache hit: badge shows complete state immediately without fetching', async () => {
-    mod._state.memCache = { '42': ['c1', 'c2'] };
+    mod._state.memCache = { '42': [
+      { id: 'c1', title: '', date: '' },
+      { id: 'c2', title: '', date: '' },
+    ] };
     makeRepliesEl('2 Replies');
     await mod.handleNote('42');
     const badge = document.getElementById('smr-badge');

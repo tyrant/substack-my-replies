@@ -108,24 +108,31 @@ function setBadgeChecking(page) {
   badge.appendChild(document.createTextNode('…'));
 }
 
+/** Builds the native tooltip text: title (if any), newline, formatted date (if any). */
+function buildTooltip(title, date) {
+  const dateStr = date ? new Date(date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '';
+  return [title, dateStr].filter(Boolean).join('\n\n');
+}
+
 /** State 3: "Replies from you: <a>1</a>, <a>2</a> … · recheck"
- *  ids — array of comment IDs authored by MY_USER_ID.
+ *  replies — array of { id, title, date } objects authored by MY_USER_ID.
  */
-function setBadgeComplete(ids, noteId) {
+function setBadgeComplete(replies, noteId) {
   const badge = getBadge();
   if (!badge) return;
   badge.innerHTML = '';
 
-  if (ids.length === 0) {
+  if (replies.length === 0) {
     badge.appendChild(document.createTextNode('No replies from you · '));
   } else {
     badge.appendChild(document.createTextNode('Replies from you: '));
-    ids.forEach((id, i) => {
+    replies.forEach((reply, i) => {
       if (i > 0) badge.appendChild(document.createTextNode(', '));
       const a = document.createElement('a');
       a.textContent = String(i + 1);
-      a.href = `https://substack.com/profile/${MY_USER_SLUG}/note/c-${id}`;
+      a.href = `https://substack.com/profile/${MY_USER_SLUG}/note/c-${reply.id}`;
       a.target = '_blank';
+      a.title = buildTooltip(reply.title, reply.date);
       badge.appendChild(a);
     });
     badge.appendChild(document.createTextNode(' · '));
@@ -184,13 +191,33 @@ function injectBadge(noteId) {
 // bail out if a newer check has started (e.g. user clicked recheck mid-flight).
 let checkToken = 0;
 
+// Returns the first URL found in a note body string, stripping trailing punctuation.
+function extractBodyUrl(body) {
+  const m = (body ?? '').match(/https?:\/\/\S+/);
+  return m ? m[0].replace(/[.,;!?)]+$/, '') : '';
+}
+
+// Extracts { id, title, date } from a raw comment object.
+// Notes don't have a title field; use the first URL in the body as a stand-in.
+function replyData(comment) {
+  return {
+    id:    comment.id,
+    title: extractBodyUrl(comment.body),
+    date:  comment.date ?? '',
+  };
+}
+
+// Tracks related-note IDs whose background check has already been initiated
+// this session, so we don't re-fetch on every augmentation call.
+const relatedNoteChecked = new Set();
+
 async function runCheck(noteId) {
   const token = ++checkToken;
   setBadgeChecking(1);
 
-  const myIds = [];
-  let cursor  = null;
-  let page    = 1;
+  const myReplies = [];
+  let cursor     = null;
+  let page       = 1;
 
   try {
     do {
@@ -209,9 +236,9 @@ async function runCheck(noteId) {
       const branches = data.commentBranches ?? [];
 
       for (const branch of branches) {
-        if (branch.comment?.user_id === MY_USER_ID) myIds.push(branch.comment.id);
+        if (branch.comment?.user_id === MY_USER_ID) myReplies.push(replyData(branch.comment));
         for (const dc of branch.descendantComments ?? []) {
-          if (dc?.user_id === MY_USER_ID) myIds.push(dc.id);
+          if (dc?.user_id === MY_USER_ID) myReplies.push(replyData(dc));
         }
       }
 
@@ -227,8 +254,8 @@ async function runCheck(noteId) {
   }
 
   if (token === checkToken) {
-    setBadgeComplete(myIds, noteId);
-    setCache(noteId, myIds);
+    setBadgeComplete(myReplies, noteId);
+    setCache(noteId, myReplies);
   }
 }
 
@@ -250,17 +277,22 @@ const memCacheReady = new Promise(resolve => { _memCacheReady = resolve; });
 async function getCache(noteId) {
   await memCacheReady;
   const entry = memCache[String(noteId)];
-  // Only accept array-format entries; old number-format entries are stale.
-  return Array.isArray(entry) ? entry : null;
+  if (!Array.isArray(entry)) return null;
+  if (entry.length > 0 && typeof entry[0] !== 'object') return null; // legacy ID-only format
+  return entry;
 }
 
 function setCache(noteId, ids) {
   memCache[String(noteId)] = ids;
-  chrome.storage.local.get(CACHE_KEY, result => {
-    const cache = result[CACHE_KEY] ?? {};
-    cache[String(noteId)] = ids;
-    chrome.storage.local.set({ [CACHE_KEY]: cache });
-  });
+  // chrome APIs throw synchronously when the extension is reloaded mid-session.
+  // The in-memory update above always succeeds; the storage write is best-effort.
+  try {
+    chrome.storage.local.get(CACHE_KEY, result => {
+      const cache = result[CACHE_KEY] ?? {};
+      cache[String(noteId)] = ids;
+      try { chrome.storage.local.set({ [CACHE_KEY]: cache }); } catch {}
+    });
+  } catch {}
 }
 
 // ---------------------------------------------------------------------------
@@ -330,28 +362,77 @@ function augmentAllReplyCards() {
     }
 
     const entry = memCache[String(noteId)];
-    const stateKey = Array.isArray(entry) ? entry.join(',') : '?';
+    const isNewFormat = Array.isArray(entry) && (entry.length === 0 || typeof entry[0] === 'object');
+    const stateKey = isNewFormat ? entry.map(r => r.id).join(',') : '?';
     if (annot.dataset.smrState === stateKey) continue;
     annot.dataset.smrState = stateKey;
 
     annot.innerHTML = '';
-    if (!Array.isArray(entry)) {
+    if (!isNewFormat) {
       annot.textContent = '(? yours)';
+      checkRelatedNote(noteId);
     } else if (entry.length === 0) {
       annot.textContent = '(yours: 0)';
     } else {
       annot.appendChild(document.createTextNode('(yours: '));
-      entry.forEach((id, i) => {
+      entry.forEach((reply, i) => {
         if (i > 0) annot.appendChild(document.createTextNode(', '));
         const a = document.createElement('a');
         a.textContent = String(i + 1);
-        a.href = `https://substack.com/profile/${MY_USER_SLUG}/note/c-${id}`;
+        a.href = `https://substack.com/profile/${MY_USER_SLUG}/note/c-${reply.id}`;
         a.target = '_blank';
+        a.title = buildTooltip(reply.title, reply.date);
         annot.appendChild(a);
       });
       annot.appendChild(document.createTextNode(')'));
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Related-note background check
+// ---------------------------------------------------------------------------
+
+// Fetches reply data for a note that appears in the Related Notes section
+// but hasn't been visited (and thus cached) yet. Fires once per note per
+// session. On success, updates the cache and re-renders annotations.
+async function checkRelatedNote(noteId) {
+  if (relatedNoteChecked.has(noteId)) return;
+  relatedNoteChecked.add(noteId);
+
+  const myReplies = [];
+  let cursor = null;
+
+  try {
+    do {
+      const url = new URL(`https://substack.com/api/v1/reader/comment/${noteId}/replies`);
+      url.searchParams.set('comment_id', noteId);
+      if (cursor) url.searchParams.set('cursor', cursor);
+
+      const resp = await fetch(url.toString(), { credentials: 'include' });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+      const data     = await resp.json();
+      const branches = data.commentBranches ?? [];
+
+      for (const branch of branches) {
+        if (branch.comment?.user_id === MY_USER_ID) myReplies.push(replyData(branch.comment));
+        for (const dc of branch.descendantComments ?? []) {
+          if (dc?.user_id === MY_USER_ID) myReplies.push(replyData(dc));
+        }
+      }
+
+      cursor = branches.length === 0 ? null : (data.nextCursor ?? null);
+    } while (cursor);
+
+  } catch (err) {
+    console.error('[Substack My Replies] related note check error:', err);
+    relatedNoteChecked.delete(noteId); // allow retry on next augmentation pass
+    return;
+  }
+  
+  setCache(noteId, myReplies);
+  augmentAllReplyCards();
 }
 
 let augObserver = null;
@@ -450,6 +531,7 @@ if (typeof module === 'undefined') {
     runCheck,
     getCache, setCache,
     findNoteIdNear, augmentAllReplyCards, startAugObserver,
+    checkRelatedNote,
     handleNote, checkUrl, init,
     // expose mutable state for tests
     _state: {
@@ -459,6 +541,7 @@ if (typeof module === 'undefined') {
       set memCache(v) { memCache = v; },
       get currentNoteId() { return currentNoteId; },
       set currentNoteId(v) { currentNoteId = v; },
+      get relatedNoteChecked() { return relatedNoteChecked; },
     },
   };
 }
