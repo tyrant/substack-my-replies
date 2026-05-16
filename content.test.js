@@ -630,6 +630,13 @@ describe('setCache', () => {
     expect(() => mod.setCache('9', ['id1'])).not.toThrow();
     expect(mod._state.memCache['9']).toEqual(['id1']);
   });
+
+  test('silently ignores set error inside the storage callback', () => {
+    chromeMock.storage.local.get.mockImplementation((key, cb) => cb({}));
+    chromeMock.storage.local.set.mockImplementation(() => { throw new Error('Extension context invalidated.'); });
+    expect(() => mod.setCache('9', ['id1'])).not.toThrow();
+    expect(mod._state.memCache['9']).toEqual(['id1']);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -929,6 +936,39 @@ describe('checkRelatedNote', () => {
     await mod.checkRelatedNote('222');
     expect(global.fetch).toHaveBeenCalledTimes(2);
     expect(mod._state.memCache['222']).toHaveLength(2);
+  });
+
+  test('collects descendant comments authored by me', async () => {
+    mockFetch({
+      commentBranches: [
+        {
+          comment: { id: 'r1', user_id: 9999, body: '', date: '' },
+          descendantComments: [{ id: 'dc1', user_id: 4619740, body: 'https://example.com/p/post', date: '2025-01-01' }],
+        },
+      ],
+      nextCursor: null,
+    });
+    await mod.checkRelatedNote('333');
+    expect(mod._state.memCache['333']).toEqual([{ id: 'dc1', title: 'https://example.com/p/post', date: '2025-01-01' }]);
+  });
+
+  test('stops after one fetch when commentBranches key is absent (defaults to empty)', async () => {
+    mockFetch({ nextCursor: 'ignored' }); // no commentBranches → [] → length 0 → cursor null
+    await mod.checkRelatedNote('444');
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(mod._state.memCache['444']).toEqual([]);
+  });
+
+  test('handles missing descendantComments key, null dc entries, non-matching dc, and absent nextCursor', async () => {
+    mockFetch({
+      commentBranches: [
+        { comment: { id: 'c1', user_id: 9999 } }, // no descendantComments key → ?? []
+        { comment: { id: 'c2', user_id: 9999 }, descendantComments: [null, { id: 'dc1', user_id: 9999 }] },
+      ],
+      // no nextCursor key → ?? null
+    });
+    await mod.checkRelatedNote('555');
+    expect(mod._state.memCache['555']).toEqual([]);
   });
 });
 
